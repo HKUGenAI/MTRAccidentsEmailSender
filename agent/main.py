@@ -1,4 +1,4 @@
-"""CLI entry: run the MTR news email agent with human email approval."""
+"""CLI entry: run the news email agent with human email approval."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 
 from agent.graph import build_agent
-from agent.mcp_tools import load_mcp_tools
+from agent.mcp_tools import mcp_tools
+from agent.skills import matching_skills
 
 
 def _interrupt_payload(result: dict[str, Any]) -> Any | None:
@@ -54,47 +55,62 @@ def _ask_approval(payload: Any) -> bool:
 
 
 async def run_once(user_request: str, thread_id: str | None = None) -> None:
-    tools = await load_mcp_tools()
-    print("Loaded tools:", [t.name for t in tools])
+    active = matching_skills(user_request)
+    if active:
+        print("Active skills:", [s.name for s in active])
 
-    graph = build_agent(tools)
-    config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
+    # Adapter must stay open while the graph calls tools (stdio MCP sessions).
+    async with mcp_tools() as tools:
+        print("Loaded tools:", [t.name for t in tools])
+        graph = build_agent(tools, user_request=user_request)
+        config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
 
-    result = await graph.ainvoke(
-        {"messages": [HumanMessage(content=user_request)]},
-        config=config,
-    )
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content=user_request)]},
+            config=config,
+        )
 
-    while True:
-        payload = _interrupt_payload(result)
-        if payload is None:
-            break
-        approved = _ask_approval(payload)
-        result = await graph.ainvoke(Command(resume=approved), config=config)
+        while True:
+            payload = _interrupt_payload(result)
+            if payload is None:
+                break
+            approved = _ask_approval(payload)
+            result = await graph.ainvoke(Command(resume=approved), config=config)
 
-    print("\n----- final -----")
-    _print_messages(result)
-    last = result["messages"][-1]
-    print("\nAssistant:", getattr(last, "content", last))
+        print("\n----- final -----")
+        _print_messages(result)
+        last = result["messages"][-1]
+        print("\nAssistant:", getattr(last, "content", last))
 
 
-def build_default_request(to: str | None) -> str:
+def build_default_request(to: str | None, topic: str | None) -> str:
     recipient = to or "my specified recipient (ask me for the address if needed)"
+    if topic:
+        return (
+            f"Find the latest reported news about {topic} and email a short summary "
+            f"to {recipient}."
+        )
     return (
-        "Find the latest reported Hong Kong MTR accident and email a short summary "
-        f"to {recipient}."
+        "Find the latest reported news on the topic named in this message and email "
+        f"a short summary to {recipient}. If no topic is named, ask me for one "
+        "before you search."
     )
 
 
 def main() -> None:
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="MTR News Email Agent (LangGraph + MCP)")
+    parser = argparse.ArgumentParser(description="News email agent (LangGraph + MCP)")
     parser.add_argument(
         "-q",
         "--query",
         default=None,
-        help="Full user request. Default: find latest MTR accident and email summary.",
+        help="Full user request. Overrides --topic.",
+    )
+    parser.add_argument(
+        "--topic",
+        default=None,
+        help='News topic, e.g. "Hong Kong restaurant hygiene" or "Hong Kong MTR accident".',
     )
     parser.add_argument(
         "--to",
@@ -108,7 +124,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    request = args.query or build_default_request(args.to)
+    request = args.query or build_default_request(args.to, args.topic)
     print("Request:", request)
     asyncio.run(run_once(request, thread_id=args.thread_id))
 

@@ -1,1 +1,1 @@
-"""MCP tool servers for the MTR news email agent."""
+"""MCP tool servers: web search, email, and SQLite extraction."""

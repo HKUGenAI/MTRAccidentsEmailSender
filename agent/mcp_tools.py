@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from langchain.mcp import MCPAdapter
 from langchain_core.tools import BaseTool, StructuredTool
@@ -15,10 +16,11 @@ from pydantic import BaseModel, Field
 ROOT = Path(__file__).resolve().parents[1]
 SEARCH_SERVER = ROOT / "mcp_servers" / "search_server.py"
 EMAIL_SERVER = ROOT / "mcp_servers" / "email_server.py"
+DB_SERVER = ROOT / "mcp_servers" / "db_server.py"
 
 
 def mcp_config() -> dict[str, Any]:
-    """Stdio MCP config pointing at the two local servers."""
+    """Stdio MCP config for search, email, and database servers."""
     python = sys.executable
     return {
         "mcpServers": {
@@ -29,6 +31,10 @@ def mcp_config() -> dict[str, Any]:
             "email": {
                 "command": python,
                 "args": [str(EMAIL_SERVER)],
+            },
+            "database": {
+                "command": python,
+                "args": [str(DB_SERVER)],
             },
         }
     }
@@ -41,7 +47,7 @@ def _tool_name(tool: BaseTool) -> str:
 def _base_tool_name(tool: BaseTool) -> str:
     """Strip MCPConfig server prefix (`search_web_search` → `web_search`)."""
     name = getattr(tool, "name", "") or ""
-    for prefix in ("search_", "email_"):
+    for prefix in ("search_", "email_", "database_"):
         if name.startswith(prefix) and name != prefix.rstrip("_"):
             return name[len(prefix) :]
     return name
@@ -152,18 +158,14 @@ def wrap_send_email_with_interrupt(send_tool: BaseTool) -> StructuredTool:
     )
 
 
-async def load_mcp_tools() -> list[BaseTool]:
-    """Discover MCP tools and replace send_email with an interrupt-gated wrapper."""
-    async with MCPAdapter(mcp_config()) as adapter:
-        tools = await adapter.list_tools()
-
+def prepare_mcp_tools(tools: list[BaseTool]) -> list[BaseTool]:
+    """Rename prefixed MCP tools and wrap send_email with interrupt()."""
     prepared: list[BaseTool] = []
     send_tool: BaseTool | None = None
     for tool in tools:
         if _is_send_email_tool(tool):
             send_tool = tool
             continue
-        # Prefer unprefixed names in the agent prompt / tool schema.
         base = _base_tool_name(tool)
         if base and base != tool.name:
             tool.name = base
@@ -177,3 +179,17 @@ async def load_mcp_tools() -> list[BaseTool]:
 
     prepared.append(wrap_send_email_with_interrupt(send_tool))
     return prepared
+
+
+@asynccontextmanager
+async def mcp_tools() -> AsyncIterator[list[BaseTool]]:
+    """Keep MCP stdio servers alive for the whole agent run."""
+    async with MCPAdapter(mcp_config()) as adapter:
+        raw = await adapter.list_tools()
+        yield prepare_mcp_tools(raw)
+
+
+async def load_mcp_tools() -> list[BaseTool]:
+    """One-shot list (tests). Prefer mcp_tools() in the CLI so sessions stay open."""
+    async with mcp_tools() as tools:
+        return list(tools)

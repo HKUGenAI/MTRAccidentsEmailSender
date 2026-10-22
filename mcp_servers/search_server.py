@@ -18,11 +18,19 @@ from mcp.server.mcpserver import MCPServer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("search_server")
 
-mcp = MCPServer("mtr-web-search")
+mcp = MCPServer("web-search")
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 SERPER_NEWS_URL = "https://google.serper.dev/news"
-USER_AGENT = "mtr-news-email-agent/1.0"
+USER_AGENT = "news-email-agent/1.0"
+
+
+def _search_locale() -> tuple[str, str, str]:
+    """(ddgs region, serper gl, serper hl) from SEARCH_REGION / SEARCH_GL / SEARCH_HL."""
+    region = (os.getenv("SEARCH_REGION") or "wt-wt").strip() or "wt-wt"
+    gl = (os.getenv("SEARCH_GL") or "us").strip() or "us"
+    hl = (os.getenv("SEARCH_HL") or "en").strip() or "en"
+    return region, gl, hl
 
 
 def _serper_search(query: str, max_results: int) -> list[dict[str, str]]:
@@ -30,12 +38,13 @@ def _serper_search(query: str, max_results: int) -> list[dict[str, str]]:
     if not api_key:
         raise RuntimeError("SERPER_API_KEY is not set")
 
+    _, gl, hl = _search_locale()
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    payload = {"q": query, "num": max_results, "gl": "hk", "hl": "en"}
+    payload = {"q": query, "num": max_results, "gl": gl, "hl": hl}
     results: list[dict[str, str]] = []
 
     with httpx.Client(timeout=30.0) as client:
-        # Prefer news endpoint for accident reports; fall back to organic search.
+        # Prefer news endpoint; fall back to organic search.
         news_resp = client.post(SERPER_NEWS_URL, headers=headers, json=payload)
         if news_resp.status_code == 200:
             for item in news_resp.json().get("news", [])[:max_results]:
@@ -74,11 +83,12 @@ def _ddg_search(query: str, max_results: int) -> list[dict[str, str]]:
     except ImportError:  # pragma: no cover
         from duckduckgo_search import DDGS  # type: ignore
 
+    region, _, _ = _search_locale()
     results: list[dict[str, str]] = []
     with DDGS() as ddgs:
-        # Prefer news hits for accident reports, then fill with web text results.
+        # Prefer news hits, then fill with web text results.
         try:
-            for item in ddgs.news(query, max_results=max_results, region="hk-en"):
+            for item in ddgs.news(query, max_results=max_results, region=region):
                 results.append(
                     {
                         "title": item.get("title") or "",
@@ -92,7 +102,7 @@ def _ddg_search(query: str, max_results: int) -> list[dict[str, str]]:
             logger.warning("ddgs.news failed (%s); falling back to text search", exc)
 
         if len(results) < max_results:
-            for item in ddgs.text(query, max_results=max_results, region="hk-en"):
+            for item in ddgs.text(query, max_results=max_results, region=region):
                 if len(results) >= max_results:
                     break
                 url = item.get("href") or item.get("link") or ""
@@ -123,7 +133,7 @@ def _run_search(query: str, max_results: int) -> list[dict[str, str]]:
 def web_search(query: str, max_results: int = 5) -> str:
     """Search the web and return result titles, URLs, and snippets.
 
-    Use this for recent news lookups (e.g. Hong Kong MTR accident reports).
+    Use this for recent news lookups on whatever topic the user named.
     Returns JSON only — do not invent details beyond these snippets.
 
     Args:

@@ -18,7 +18,7 @@ from mcp.server.mcpserver import MCPServer
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("email_server")
 
-mcp = MCPServer("mtr-email")
+mcp = MCPServer("email")
 
 
 def _truthy(value: str | None, default: bool = True) -> bool:

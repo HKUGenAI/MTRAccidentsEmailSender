@@ -18,7 +18,7 @@ from langchain.mcp import MCPAdapter  # noqa: E402
 
 async def main() -> None:
     load_dotenv(ROOT / ".env")
-    query = " ".join(sys.argv[1:]) or "Hong Kong MTR accident 2025"
+    query = " ".join(sys.argv[1:]) or "latest safety news"
     async with MCPAdapter(mcp_config()) as adapter:
         tools = await adapter.list_tools()
         search = next(t for t in tools if t.name.endswith("web_search"))

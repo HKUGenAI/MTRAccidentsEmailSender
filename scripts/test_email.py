@@ -26,7 +26,7 @@ async def main() -> None:
         raw = await send.ainvoke(
             {
                 "to": to,
-                "subject": "[TEST] MTR email tool dry-run",
+                "subject": "[TEST] email tool dry-run",
                 "body": "This is a test body from scripts/test_email.py.\nSource: https://example.com",
             }
         )
