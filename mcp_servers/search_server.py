@@ -24,6 +24,18 @@ SERPER_SEARCH_URL = "https://google.serper.dev/search"
 SERPER_NEWS_URL = "https://google.serper.dev/news"
 USER_AGENT = "news-email-agent/1.0"
 
+_LANG_TO_HL_GL = {
+    "en": ("en", "us"),
+    "en-us": ("en", "us"),
+    "en-gb": ("en", "uk"),
+    "zh": ("zh-tw", "hk"),
+    "zh-tw": ("zh-tw", "hk"),
+    "zh-hant": ("zh-tw", "hk"),
+    "zh-hk": ("zh-tw", "hk"),
+    "zh-cn": ("zh-cn", "cn"),
+    "yue": ("zh-tw", "hk"),
+}
+
 
 def _search_locale() -> tuple[str, str, str]:
     """(ddgs region, serper gl, serper hl) from SEARCH_REGION / SEARCH_GL / SEARCH_HL."""
@@ -33,14 +45,56 @@ def _search_locale() -> tuple[str, str, str]:
     return region, gl, hl
 
 
-def _serper_search(query: str, max_results: int) -> list[dict[str, str]]:
+def _hl_gl_for_language(language: str) -> tuple[str, str]:
+    raw = (language or "").strip().lower().replace("_", "-")
+    if not raw:
+        _, gl, hl = _search_locale()
+        return hl, gl
+    return _LANG_TO_HL_GL.get(raw, (raw.split("-")[0] or "en", "us"))
+
+
+def _days_to_tbs(days_back: int) -> str:
+    days = max(1, int(days_back))
+    if days <= 1:
+        return "qdr:d"
+    if days < 7:
+        return f"qdr:d{days}"
+    if days == 7:
+        return "qdr:w"
+    if days <= 31:
+        return "qdr:m"
+    return "qdr:y"
+
+
+def _with_domains(query: str, include_domains: str) -> str:
+    sites = " OR ".join(
+        f"site:{part.strip()}"
+        for part in (include_domains or "").split(",")
+        if part.strip()
+    )
+    if not sites:
+        return query
+    return f"({sites}) {query}".strip()
+
+
+def _serper_search(
+    query: str,
+    max_results: int,
+    *,
+    include_domains: str = "",
+    days_back: int = 0,
+    language: str = "",
+) -> list[dict[str, str]]:
     api_key = (os.getenv("SERPER_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("SERPER_API_KEY is not set")
 
-    _, gl, hl = _search_locale()
+    hl, gl = _hl_gl_for_language(language)
+    effective_query = _with_domains(query, include_domains)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    payload = {"q": query, "num": max_results, "gl": gl, "hl": hl}
+    payload: dict[str, Any] = {"q": effective_query, "num": max_results, "gl": gl, "hl": hl}
+    if days_back and int(days_back) > 0:
+        payload["tbs"] = _days_to_tbs(int(days_back))
     results: list[dict[str, str]] = []
 
     with httpx.Client(timeout=30.0) as client:
@@ -77,7 +131,13 @@ def _serper_search(query: str, max_results: int) -> list[dict[str, str]]:
     return results
 
 
-def _ddg_search(query: str, max_results: int) -> list[dict[str, str]]:
+def _ddg_search(
+    query: str,
+    max_results: int,
+    *,
+    include_domains: str = "",
+) -> list[dict[str, str]]:
+    query = _with_domains(query, include_domains)
     try:
         from ddgs import DDGS
     except ImportError:  # pragma: no cover
@@ -120,17 +180,36 @@ def _ddg_search(query: str, max_results: int) -> list[dict[str, str]]:
     return results[:max_results]
 
 
-def _run_search(query: str, max_results: int) -> list[dict[str, str]]:
+def _run_search(
+    query: str,
+    max_results: int,
+    *,
+    include_domains: str = "",
+    days_back: int = 0,
+    language: str = "",
+) -> list[dict[str, str]]:
     max_results = max(1, min(int(max_results), 10))
     if (os.getenv("SERPER_API_KEY") or "").strip():
         logger.info("Searching via Serper: %s", query)
-        return _serper_search(query, max_results)
+        return _serper_search(
+            query,
+            max_results,
+            include_domains=include_domains,
+            days_back=days_back,
+            language=language,
+        )
     logger.info("Searching via DuckDuckGo: %s", query)
-    return _ddg_search(query, max_results)
+    return _ddg_search(query, max_results, include_domains=include_domains)
 
 
 @mcp.tool()
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(
+    query: str,
+    max_results: int = 5,
+    include_domains: str = "",
+    days_back: int = 0,
+    language: str = "",
+) -> str:
     """Search the web and return result titles, URLs, and snippets.
 
     Use this for recent news lookups on whatever topic the user named.
@@ -139,9 +218,19 @@ def web_search(query: str, max_results: int = 5) -> str:
     Args:
         query: Search query string.
         max_results: Maximum number of results (1–10). Defaults to 5.
+        include_domains: Optional comma-separated domains (adds site: filters).
+            Example: labour.gov.hk
+        days_back: Optional recency window in days (Serper tbs filter). 0 = any time.
+        language: Optional locale hint (en, zh-hk). Empty uses SEARCH_HL / SEARCH_GL.
     """
     try:
-        hits = _run_search(query, max_results)
+        hits = _run_search(
+            query,
+            max_results,
+            include_domains=include_domains,
+            days_back=days_back,
+            language=language,
+        )
     except Exception as exc:  # noqa: BLE001 — surface tool errors to the model
         logger.exception("web_search failed")
         return json.dumps({"ok": False, "error": str(exc), "results": []})

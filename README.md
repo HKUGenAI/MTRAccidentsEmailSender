@@ -3,7 +3,7 @@
 LangGraph + MCP agent. The graph is the same for every task; **tools** and **skills** decide what it does.
 
 - Tools: `web_search`, SQLite read/extract (`list_tables`, `describe_table`, `query_database`, `extract_rows`, `save_extract`), `send_email` (human approval)
-- Skills: markdown playbooks in `agent/skills/`. If you say **create safety awareness pulse**, that skill is injected into the system prompt so the agent already knows the format and which tools to call.
+- Skills: markdown playbooks in `agent/skills/`, each bound as a `use_*` tool. The model decides whether to call one (same as any other tool); the tool returns the full playbook.
 - Topic is whatever you pass in (not hardcoded to MTR)
 
 Based on:
@@ -93,8 +93,8 @@ python scripts\test_skills.py
 | `mcp_servers/email_server.py` | MCP `send_email` (SMTP / dry-run) |
 | `mcp_servers/db_server.py` | MCP `list_tables`, `describe_table`, `query_database`, `extract_rows`, `save_extract` |
 | `agent/mcp_tools.py` | `MCPAdapter` load (session stays open) + interrupt wrapper |
-| `agent/graph.py` | LangGraph `assistant` ⇄ `tools` + skill injection |
-| `agent/skills.py` | Load `agent/skills/*/SKILL.md` and match the user request |
+| `agent/graph.py` | LangGraph `assistant` ⇄ `tools` (MCP + skill tools) |
+| `agent/skills.py` | Load `agent/skills/*/SKILL.md` as optional `use_*` tools |
 | `agent/skills/safety-awareness-pulse/` | Runtime skill: create a safety awareness pulse |
 | `agent/main.py` | CLI + `Command(resume=...)` approval loop |
 
@@ -103,10 +103,9 @@ python scripts\test_skills.py
 ```
 User request
     │
-    ├─ skills.py  (if text matches a skill, inject SKILL.md into the system prompt)
-    │
     └─ LangGraph  START → assistant ⇄ tools → END
                       │
+                      ├─ use_* skill tools (optional playbooks; model chooses)
                       ├─ web_search
                       ├─ list_tables / describe_table / query_database / extract_rows / save_extract
                       └─ send_email (interrupt until y/N)

@@ -14,7 +14,7 @@ from langgraph.types import Command
 
 from agent.graph import build_agent
 from agent.mcp_tools import mcp_tools
-from agent.skills import matching_skills
+from agent.skills import build_skill_tools
 
 
 def _interrupt_payload(result: dict[str, Any]) -> Any | None:
@@ -55,12 +55,9 @@ def _ask_approval(payload: Any) -> bool:
 
 
 async def run_once(user_request: str, thread_id: str | None = None) -> None:
-    active = matching_skills(user_request)
-    if active:
-        print("Active skills:", [s.name for s in active])
-
     # Adapter must stay open while the graph calls tools (stdio MCP sessions).
     async with mcp_tools() as tools:
+        tools = [*tools, *build_skill_tools()]
         print("Loaded tools:", [t.name for t in tools])
         graph = build_agent(tools, user_request=user_request)
         config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}

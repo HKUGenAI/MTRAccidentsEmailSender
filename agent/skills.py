@@ -1,13 +1,15 @@
-"""Load markdown skills and inject matching ones into the agent system prompt.
+"""Load markdown skills and expose each one as a tool the model can choose to call.
 
-Skills live in agent/skills/<name>/SKILL.md (runtime). Cursor copies may also
-exist under .cursor/skills/; those are for the IDE, not this loader.
+Skills live in agent/skills/<name>/SKILL.md. Calling a skill tool returns the
+playbook; the model then follows it with the other tools (search, DB, email).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from langchain_core.tools import BaseTool, StructuredTool
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = Path(__file__).resolve().parent / "skills"
@@ -21,13 +23,9 @@ class Skill:
     body: str = ""
     path: Path | None = None
 
-    def matches(self, text: str) -> bool:
-        hay = (text or "").lower()
-        if not hay:
-            return False
-        if self.name.replace("-", " ") in hay:
-            return True
-        return any(t.lower() in hay for t in self.triggers if t.strip())
+    @property
+    def tool_name(self) -> str:
+        return "use_" + self.name.replace("-", "_")
 
 
 def _parse_frontmatter(raw: str) -> tuple[dict[str, object], str]:
@@ -91,25 +89,53 @@ def load_skills(directory: Path | None = None) -> list[Skill]:
     return skills
 
 
-def matching_skills(user_request: str, skills: list[Skill] | None = None) -> list[Skill]:
-    loaded = skills if skills is not None else load_skills()
-    return [s for s in loaded if s.matches(user_request)]
+def _hong_kong_today() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-
-def format_skills_for_prompt(user_request: str, skills: list[Skill] | None = None) -> str:
-    loaded = skills if skills is not None else load_skills()
-    if not loaded:
-        return ""
-    catalog = "\n".join(
-        f"- {s.name}: {s.description or 'see SKILL.md'}" for s in loaded
+    today = datetime.now(ZoneInfo("Asia/Hong_Kong")).date()
+    return (
+        f"Hong Kong today: {today.isoformat()} "
+        f"(month_day {today.strftime('%m-%d')}, timezone Asia/Hong_Kong)."
     )
-    matched = matching_skills(user_request, loaded)
-    parts = [
-        "Available skills (follow a skill when the user request matches it):",
-        catalog,
-    ]
-    if matched:
-        parts.append("Active skill(s) for this request — follow them now:")
-        for s in matched:
-            parts.append(f"### {s.name}\n{s.body}")
-    return "\n\n".join(parts)
+
+
+def format_skill_playbook(skill: Skill) -> str:
+    examples = ", ".join(skill.triggers) if skill.triggers else skill.name
+    return "\n\n".join(
+        [
+            f"Skill loaded: {skill.name}",
+            _hong_kong_today(),
+            "Reply in the same language as the user's request "
+            "(Traditional Chinese if they wrote in Chinese, English if they wrote in English, "
+            "and so on). If the message mixes languages, use the language of the actual ask. "
+            "Do not default to Chinese or English unless the query does.",
+            f"When to use this skill (examples): {examples}",
+            "Follow the playbook below using the other bound tools. Stop at the first usable hit.",
+            skill.body,
+        ]
+    )
+
+
+def _skill_to_tool(skill: Skill) -> StructuredTool:
+    def _run() -> str:
+        return format_skill_playbook(skill)
+
+    examples = ", ".join(skill.triggers[:6]) if skill.triggers else skill.name
+    description = (
+        f"{skill.description or skill.name} "
+        "This is a skill: a multi-step playbook, not a data lookup. "
+        f"Call this tool only when the user actually wants that task (examples: {examples}). "
+        "It returns the full instructions; then use search / database / email tools as directed. "
+        "Do not call it for unrelated news search or email requests."
+    )
+    return StructuredTool.from_function(
+        name=skill.tool_name,
+        description=description,
+        func=_run,
+    )
+
+
+def build_skill_tools(directory: Path | None = None) -> list[BaseTool]:
+    """One LangChain tool per SKILL.md so the model can choose to load a playbook."""
+    return [_skill_to_tool(skill) for skill in load_skills(directory)]

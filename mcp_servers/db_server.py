@@ -163,21 +163,44 @@ def query_database(sql: str, max_rows: int = 50) -> str:
         return _err(str(exc))
 
 
+_MONTH_DAY_RE = re.compile(r"^(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
+
+
 @mcp.tool()
-def extract_rows(table: str, topic: str = "", limit: int = 20) -> str:
+def extract_rows(
+    table: str,
+    topic: str = "",
+    limit: int = 20,
+    month_day: str = "",
+    iso_date_from: str = "",
+    iso_date_to: str = "",
+) -> str:
     """Extract recent rows from a table as JSON (basic dump / filter).
 
-    For the default `extracts` table, pass topic to filter. For other tables,
-    returns the latest rows up to limit.
+    For `extracts`, pass topic to filter. For `events` (SafetyAwarenessPulse
+    schema), pass month_day (MM-DD) and/or iso_date_from / iso_date_to.
 
     Args:
         table: Table to read.
-        topic: Optional topic filter (extracts.topic LIKE %topic%).
+        topic: Optional topic filter (topic/title/content LIKE %topic%).
         limit: Maximum rows (1–200). Defaults to 20.
+        month_day: Optional MM-DD (events.month_day exact match).
+        iso_date_from: Optional YYYY-MM-DD lower bound (iso_date column).
+        iso_date_to: Optional YYYY-MM-DD upper bound (iso_date column).
     """
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table or ""):
         return _err("Invalid table name.")
     limit = max(1, min(int(limit), 200))
+    month_day = (month_day or "").strip()
+    iso_from = (iso_date_from or "").strip()
+    iso_to = (iso_date_to or "").strip()
+    if month_day and not _MONTH_DAY_RE.match(month_day):
+        return _err("month_day must be MM-DD.")
+    if iso_from and not _ISO_DATE_RE.match(iso_from):
+        return _err("iso_date_from must be YYYY-MM-DD.")
+    if iso_to and not _ISO_DATE_RE.match(iso_to):
+        return _err("iso_date_to must be YYYY-MM-DD.")
     try:
         with _connect() as conn:
             exists = conn.execute(
@@ -187,12 +210,37 @@ def extract_rows(table: str, topic: str = "", limit: int = 20) -> str:
             if not exists:
                 return _err(f"No table named {table!r}.")
             cols = [c["name"] for c in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            clauses: list[str] = []
             params: list[Any] = []
-            where = ""
-            if topic and "topic" in cols:
-                where = "WHERE topic LIKE ?"
-                params.append(f"%{topic}%")
-            order = "ORDER BY id DESC" if "id" in cols else ""
+            if topic:
+                like = f"%{topic}%"
+                like_cols = [c for c in ("topic", "title", "content", "snippet") if c in cols]
+                if like_cols:
+                    clauses.append(
+                        "(" + " OR ".join(f"{c} LIKE ?" for c in like_cols) + ")"
+                    )
+                    params.extend([like] * len(like_cols))
+            if month_day:
+                if "month_day" not in cols:
+                    return _err(f"Table {table!r} has no month_day column.")
+                clauses.append("month_day = ?")
+                params.append(month_day)
+            if iso_from or iso_to:
+                if "iso_date" not in cols:
+                    return _err(f"Table {table!r} has no iso_date column.")
+                if iso_from:
+                    clauses.append("iso_date >= ?")
+                    params.append(iso_from)
+                if iso_to:
+                    clauses.append("iso_date <= ?")
+                    params.append(iso_to)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            if "iso_date" in cols:
+                order = "ORDER BY iso_date DESC, id DESC" if "id" in cols else "ORDER BY iso_date DESC"
+            elif "id" in cols:
+                order = "ORDER BY id DESC"
+            else:
+                order = ""
             sql = f"SELECT * FROM {table} {where} {order} LIMIT {limit}"
             rows = conn.execute(sql, params).fetchall()
         return _ok({"table": table, "count": len(rows), "rows": [dict(r) for r in rows]})
